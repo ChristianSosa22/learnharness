@@ -1,4 +1,5 @@
-export type LiveProcess = { toolCallIds: string[]; kill(): void };
+/** sessionId is pi's stream sessionId: the chat id for the teacher, a fresh uuid per subagent run. */
+export type LiveProcess = { toolCallIds: string[]; sessionId?: string; kill(): void };
 
 // pi runs a message's tools (each capped at 30s by tool-execute) and calls back well within this;
 // it stays under MCP_TOOL_TIMEOUT so an orphaned process is killed before the CLI gives up on its own.
@@ -33,6 +34,17 @@ export function getLiveProcess(toolCallIds: string[]): LiveProcess | null {
 	}
 
 	return null;
+}
+
+// A session runs one agent turn at a time, so a held process of the same session that the new
+// step didn't continue (e.g. the run ended on a question tool) will never be continued.
+export function killSessionLiveProcesses(sessionId: string): void {
+	for (const process of [...liveProcesses.keys()]) {
+		if (process.sessionId !== sessionId) continue;
+
+		removeLiveProcess(process);
+		process.kill();
+	}
 }
 
 export function removeLiveProcess(process: LiveProcess): void {

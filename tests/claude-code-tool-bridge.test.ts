@@ -223,3 +223,19 @@ test("toolNameFromMcp strips the bridge prefix", () => {
 	assert.equal(toolNameFromMcp("mcp__learnharness__read"), "read");
 	assert.equal(toolNameFromMcp("read"), "read");
 });
+
+test('a call carrying _meta["claudecode/toolUseId"] is pending with that toolUseId', async (t) => {
+	const bridge = await createToolBridge([READ_TOOL]);
+	t.after(() => bridge.close());
+	const client = await connectClient(bridge);
+	t.after(() => client.close());
+
+	const pending = client.callTool({ name: "read", arguments: { path: "notes.md" }, _meta: { "claudecode/toolUseId": "toolu_meta" } });
+
+	const [call] = await bridge.waitForToolCalls(1);
+	assert.ok(call);
+	assert.deepEqual(call, { name: "read", arguments: { path: "notes.md" }, toolUseId: "toolu_meta" });
+
+	bridge.resolveToolCall(call, toolResult([{ type: "text", text: "ok" }]));
+	await pending;
+});

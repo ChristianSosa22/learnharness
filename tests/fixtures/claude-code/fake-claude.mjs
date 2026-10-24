@@ -5,6 +5,7 @@
  *   {"fake":"hold"}                          stay alive until killed, like the CLI waiting on a held MCP call
  *   {"fake":"exit","code":1,"stderr":"..."}  write stderr and exit with that code
  *   {"fake":"call","name":"read","arguments":{...}}  call that tool on the MCP bridge and wait for its result
+ *     (with "toolUseId", the call carries _meta["claudecode/toolUseId"], as the real CLI sends)
  *   {"fake":"reply"}                         stream one assistant message whose text is every result so far, joined by " | "
  * FAKE_CLAUDE_STDIN, when set, receives the stdin it read.
  */
@@ -65,7 +66,8 @@ for (const line of lines) {
 
 	if (directive.fake === "call") {
 		bridge ??= await connectBridge(mcpConfig);
-		const result = await bridge.callTool({ name: directive.name, arguments: directive.arguments });
+		const meta = directive.toolUseId ? { _meta: { "claudecode/toolUseId": directive.toolUseId } } : {};
+		const result = await bridge.callTool({ name: directive.name, arguments: directive.arguments, ...meta });
 		results.push(result.content.map((block) => block.text).join(""));
 		continue;
 

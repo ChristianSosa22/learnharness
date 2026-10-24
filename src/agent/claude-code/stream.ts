@@ -28,7 +28,7 @@ import { parseStreamingJson, parseToolCallArguments } from "@earendil-works/pi-a
 import { getClaudeBinary } from "./binary.ts";
 import { parseCliLine, type CliBlock, type CliEvent, type CliUsage } from "./cli-events.ts";
 import { ClaudeCodeError } from "./constants.ts";
-import { addLiveProcess, getLiveProcess, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
+import { addLiveProcess, getLiveProcess, killSessionLiveProcesses, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
 import { createToolBridge, toolNameFromMcp, type PendingToolCall, type ToolBridge } from "./tool-bridge.ts";
 import { toClaudeInput, toStreamJsonLine } from "./transcript.ts";
 
@@ -368,7 +368,10 @@ function isValidToolCall(tools: Tool[], toolCall: ToolCall): boolean {
 	}
 }
 
+// The CLI's tool_use id is exact; name + arguments is the fallback for a CLI that doesn't send it.
 function isSameToolCall(toolCall: ToolCall, call: PendingToolCall): boolean {
+	if (call.toolUseId !== undefined) return toolCall.id === call.toolUseId;
+
 	return toolCall.name === call.name && isDeepStrictEqual(toolCall.arguments, call.arguments);
 }
 
@@ -384,6 +387,7 @@ class ClaudeProcess implements LiveProcess {
 		private readonly files: TurnFiles,
 		private readonly tools: Tool[],
 		private turn: ClaudeTurn,
+		readonly sessionId: string | undefined,
 	) {}
 
 	start(stdinLine: string, signal: AbortSignal | undefined): void {
@@ -530,14 +534,22 @@ function continueLiveProcess(turn: ClaudeTurn, messages: Message[], signal: Abor
 	return true;
 }
 
-// Either one takes precedence over the logged-in subscription, so a key saved on the Keys page
-// would bill turns to the API account.
-const API_CREDENTIAL_ENV_NAMES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+// Each one takes precedence over the logged-in subscription, so a key saved on the Keys page
+// (or an ambient endpoint override) would bill turns to an API account or another backend.
+const SUBSCRIPTION_OVERRIDE_ENV_NAMES = [
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"ANTHROPIC_BASE_URL",
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+];
 
-function toClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-	const claudeEnv: NodeJS.ProcessEnv = { ...env, MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS) };
+export function toClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	// Auto-memory is on by default and would load and write ~/.claude memory files per temp cwd.
+	const claudeEnv: NodeJS.ProcessEnv = { ...env, MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS), CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" };
 
-	for (const name of API_CREDENTIAL_ENV_NAMES) delete claudeEnv[name];
+	for (const name of SUBSCRIPTION_OVERRIDE_ENV_NAMES) delete claudeEnv[name];
 
 	return claudeEnv;
 }
@@ -574,7 +586,7 @@ async function startProcess(
 		return;
 	}
 
-	new ClaudeProcess(child, bridge, files, input.tools, turn).start(toStreamJsonLine(input.userContent), options?.signal);
+	new ClaudeProcess(child, bridge, files, input.tools, turn, options?.sessionId).start(toStreamJsonLine(input.userContent), options?.signal);
 }
 
 export function createClaudeCodeStreamFunction(runClaude: RunClaude): StreamFunction<Api, SimpleStreamOptions> {
@@ -583,6 +595,8 @@ export function createClaudeCodeStreamFunction(runClaude: RunClaude): StreamFunc
 		const turn = new ClaudeTurn(stream, model);
 
 		if (continueLiveProcess(turn, context.messages, options?.signal)) return stream;
+
+		if (options?.sessionId) killSessionLiveProcesses(options.sessionId);
 
 		startProcess(runClaude, turn, model, context, options).catch((error: unknown) => {
 			console.error("claude CLI turn failed:", error);

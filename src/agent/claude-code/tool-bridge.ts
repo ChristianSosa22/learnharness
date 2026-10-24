@@ -18,7 +18,10 @@ const MCP_TOOL_PREFIX = `mcp__${BRIDGE_SERVER_NAME}__`;
 const LOOPBACK_HOST = "127.0.0.1";
 const TOKEN_BYTES = 32;
 
-export type PendingToolCall = { name: string; arguments: JsonObject };
+/** toolUseId is the CLI's tool_use id from `_meta["claudecode/toolUseId"]`, when it sends one. */
+export type PendingToolCall = { name: string; arguments: JsonObject; toolUseId?: string };
+
+const TOOL_USE_ID_META = "claudecode/toolUseId";
 
 export type ToolBridge = {
 	mcpConfig: string;
@@ -110,7 +113,12 @@ function createMcpServer(tools: Tool[], queue: ToolCallQueue): Server {
 	server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: tools.map(toMcpTool) }));
 
 	server.setRequestHandler(CallToolRequestSchema, (request) => {
-		const call = { name: request.params.name, arguments: (request.params.arguments ?? {}) as JsonObject };
+		const toolUseId = request.params._meta?.[TOOL_USE_ID_META];
+		const call: PendingToolCall = {
+			name: request.params.name,
+			arguments: (request.params.arguments ?? {}) as JsonObject,
+			...(typeof toolUseId === "string" ? { toolUseId } : {}),
+		};
 		return queue.add(call);
 	});
 

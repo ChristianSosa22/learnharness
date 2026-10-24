@@ -183,6 +183,11 @@ function callTool(toolUse: ToolUse): string {
 	return JSON.stringify({ fake: "call", name: toolUse.name, arguments: toolUse.arguments });
 }
 
+/** Like callTool, carrying the tool_use id in _meta as the real CLI does. */
+function callToolWithId(toolUse: ToolUse): string {
+	return JSON.stringify({ fake: "call", name: toolUse.name, arguments: toolUse.arguments, toolUseId: toolUse.id });
+}
+
 function toToolResult(toolUse: ToolUse, text: string): ToolResultMessage {
 	return {
 		role: "toolResult",
@@ -574,7 +579,8 @@ test("cwd is an empty temp dir; prompt and mcp config live in a separate private
 	assert.ok(!privateDir.startsWith(call.cwd + sep));
 	assert.equal(dirname(getFlagValue(call.args, "--mcp-config")), privateDir);
 	assert.equal(call.systemPrompt, "You are a tutor.");
-	assert.equal(call.mcpConfigMode, 0o600);
+	// Windows has no POSIX permission bits (stat reports 0o666 for any writable file).
+	if (process.platform !== "win32") assert.equal(call.mcpConfigMode, 0o600);
 
 	const mcpConfig = JSON.parse(call.mcpConfig) as { mcpServers: Record<string, { url: string }> };
 	assert.match(mcpConfig.mcpServers.learnharness?.url ?? "", /^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
@@ -587,12 +593,21 @@ test("spawns with the model alias, effort, bridge tools, MCP_TOOL_TIMEOUT and th
 	assert.equal(getFlagValue(call.args, "--effort"), "xhigh");
 	assert.equal(getFlagValue(call.args, "--allowedTools"), "mcp__learnharness__read");
 	assert.equal(call.env.MCP_TOOL_TIMEOUT, "1800000");
+	assert.equal(call.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1");
 	assert.equal(call.env.HOME, process.env.HOME);
 	assert.equal(call.env.CLAUDE_CONFIG_DIR, process.env.CLAUDE_CONFIG_DIR);
 });
 
-test("spawns without Anthropic API credentials so turns stay on the subscription", async (t) => {
-	const saved = { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN };
+test("spawns without Anthropic API credentials or backend overrides so turns stay on the subscription", async (t) => {
+	const overrides = {
+		ANTHROPIC_API_KEY: "sk-ant-test",
+		ANTHROPIC_AUTH_TOKEN: "token-test",
+		ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat-test",
+		ANTHROPIC_BASE_URL: "https://proxy.invalid",
+		CLAUDE_CODE_USE_BEDROCK: "1",
+		CLAUDE_CODE_USE_VERTEX: "1",
+	};
+	const saved = Object.fromEntries(Object.keys(overrides).map((name) => [name, process.env[name]]));
 	t.after(() => {
 		for (const [name, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[name];
@@ -600,14 +615,12 @@ test("spawns without Anthropic API credentials so turns stay on the subscription
 		}
 	});
 
-	process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-	process.env.ANTHROPIC_AUTH_TOKEN = "token-test";
+	Object.assign(process.env, overrides);
 
 	const { calls } = await runScenario(t, readFixtureLines("text.jsonl"));
 	const call = getOnlyCall(calls);
 
-	assert.equal(call.env.ANTHROPIC_API_KEY, undefined);
-	assert.equal(call.env.ANTHROPIC_AUTH_TOKEN, undefined);
+	for (const name of Object.keys(overrides)) assert.equal(call.env[name], undefined, name);
 });
 
 test("writes the transcript as one stream-json user line on stdin", async (t) => {
@@ -778,4 +791,36 @@ test("two concurrent streams keep separate processes and results never cross", a
 	assert.equal(getText(replyTwo), "from two");
 	assert.equal(one.calls.length, 1);
 	assert.equal(two.calls.length, 1);
+});
+
+test("held calls match the CLI's tool_use id, so identical calls get their own results", async (t) => {
+	const first: ToolUse = { id: "toolu_same_first", name: "read", arguments: { path: "a" } };
+	const second: ToolUse = { id: "toolu_same_second", name: "read", arguments: { path: "a" } };
+	// The CLI calls the second one first; name + arguments alone can't tell them apart.
+	const { runClaude } = createFakeRun(t, [...toToolUseMessage([first, second]), callToolWithId(second), callToolWithId(first), REPLY]);
+	const streamFunction = createClaudeCodeStreamFunction(runClaude);
+	const toolMessage = await runTurn(streamFunction, [HI]);
+
+	const reply = await runTurn(streamFunction, [HI, toolMessage, toToolResult(first, "first"), toToolResult(second, "second")]);
+
+	assert.equal(getText(reply), "second | first");
+});
+
+test("a fresh step in the same session kills that session's held process; other sessions keep theirs", async (t) => {
+	const readA: ToolUse = { id: "toolu_session_a", name: "read", arguments: { path: "a" } };
+	const readB: ToolUse = { id: "toolu_session_b", name: "read", arguments: { path: "b" } };
+	const held = createFakeRun(t, [...toToolUseMessage([readA]), callTool(readA), REPLY]);
+	const other = createFakeRun(t, [...toToolUseMessage([readB]), callTool(readB), REPLY]);
+	const fresh = createFakeRun(t, readFixtureLines("text.jsonl"));
+
+	await runTurn(createClaudeCodeStreamFunction(held.runClaude), [HI], { sessionId: "chat-1" });
+	await runTurn(createClaudeCodeStreamFunction(other.runClaude), [HI], { sessionId: "chat-2" });
+
+	// e.g. the run ended on a question tool and the next turn's transcript no longer ends in readA.
+	await runTurn(createClaudeCodeStreamFunction(fresh.runClaude), [{ role: "user", content: "next", timestamp: 1 }], { sessionId: "chat-1" });
+
+	await assertCleanedUp(getOnlyCall(held.calls));
+	const otherChild = getOnlyCall(other.calls).child;
+	assert.equal(otherChild.exitCode, null);
+	assert.equal(otherChild.signalCode, null);
 });
