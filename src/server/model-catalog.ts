@@ -23,6 +23,11 @@ import { piModels } from "../agent/models.ts";
 import { chatGPTConnected, chatGPTModel, chatGPTModels, refreshChatGPTModels } from "../agent/chatgpt-bridge.ts";
 
 export async function refreshConnectionCatalog(): Promise<void> {
+	// Not awaited: the CLI's auth check takes seconds; catalogProviders() reads its cached result.
+	// Disabled under NODE_ENV=test (the jobs.ts recoverStaleJobs precedent): never spawn a real CLI.
+	if (process.env.NODE_ENV !== "test") {
+		getClaudeCodeStatus().catch((error: unknown) => console.error("claude-code status check failed:", error));
+	}
 	await refreshChatGPTModels(piModels().getModels("openai").filter((m): m is Model<"openai-responses"> => m.api === "openai-responses"));
 }
 function connectionModel(provider: string, id: string): Model<Api> | undefined {
@@ -43,6 +48,9 @@ import type {
 } from "../core/contracts/models.ts";
 import type { EffectiveModelSpec, EffectiveSlot } from "../core/settings-resolution.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
+import { getClaudeBinary } from "../agent/claude-code/binary.ts";
+import { CLAUDE_CODE_PROVIDER } from "../agent/claude-code/constants.ts";
+import { cachedClaudeCodeStatus, getClaudeCodeStatus } from "../agent/claude-code/status.ts";
 import { BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type BackgroundModelRole, type ModelSlotName, type ModelsSettings } from "../core/settings.ts";
 
 /** The picker's client-safe model entry (contract: core/contracts/models.ts). */
@@ -134,7 +142,20 @@ export function catalogProviders(): CatalogProvider[] {
 		id: p.id,
 		envVar: p.envVar,
 		keyPresent: keyValue(p.envVar) !== undefined,
-	})).concat([{ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() }]).sort((a, b) => a.id.localeCompare(b.id));
+	}))
+		.concat([
+			{ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() },
+			{ id: CLAUDE_CODE_PROVIDER, envVar: "", keyPresent: claudeCodeConfigured() },
+		])
+		.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** claude-code is usable when the CLI is found and signed in. The auth check takes seconds and
+ *  runs in the background, so until its first result a found CLI counts as configured. */
+function claudeCodeConfigured(): boolean {
+	const status = cachedClaudeCodeStatus();
+
+	return status ? status.found && status.loggedIn : getClaudeBinary() !== null;
 }
 
 /** The providers whose key is present — the picker federates exactly

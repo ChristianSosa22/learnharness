@@ -43,4 +43,6 @@ export * from "./compaction.ts";
 export { runPiTurn, piTurnResponse, type PiTurnHandle, type PiTurnSpec } from "./pi/ui-stream.ts";
 export * from "./observability.ts";
 export * from "./model-catalog.ts";
+// The Claude Code CLI status behind GET /api/claude-code/status (server→agent, lawful direction).
+export { getClaudeCodeStatus } from "../agent/claude-code/status.ts";
 export { sessionCost } from "./pricing.ts";

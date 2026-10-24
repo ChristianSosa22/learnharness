@@ -4,12 +4,14 @@
  */
 import { calculateCost, type Usage } from "@earendil-works/pi-ai";
 import { piModels } from "../agent/models.ts";
+import { CLAUDE_CODE_PROVIDER } from "../agent/claude-code/constants.ts";
 import type { CallUsage, ChatRecord, JobRecord, TurnUsage } from "../core/contracts.ts";
 import { isChatGPTPlan, sessionCost as foldSessionCost, turnCost as foldTurnCost, jobCost as foldJobCost } from "../core/prices.ts";
 
+// claude-code is billed to the Claude subscription: unpriced ("—"), never priced at API rates.
 function catalogModel(id: string) {
 	const colon = id.indexOf(":");
-	if (colon < 0 || isChatGPTPlan(id)) return undefined;
+	if (colon < 0 || isChatGPTPlan(id) || id.startsWith(`${CLAUDE_CODE_PROVIDER}:`)) return undefined;
 	return piModels().getModel(id.slice(0, colon), id.slice(colon + 1));
 }
 
